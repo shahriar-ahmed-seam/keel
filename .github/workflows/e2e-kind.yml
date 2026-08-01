@@ -38,7 +38,6 @@ jobs:
           helm repo update
           helm upgrade --install argocd argo/argo-cd \
             --namespace argocd --version 7.7.11 \
-            --set configs.params."server\.insecure"=true \
             --set dex.enabled=false \
             --set controller.replicas=1 \
             --set server.replicas=1 \
@@ -99,18 +98,25 @@ jobs:
           password=$(kubectl -n argocd get secret argocd-initial-admin-secret \
             -o jsonpath='{.data.password}' | base64 -d)
 
+          # Argo CD serves TLS with a self-signed certificate by default, so this
+          # talks to :443 with -k. An earlier version asked for plaintext on :80
+          # and every connection came back as `curl: (56) Connection reset by
+          # peer` — a TLS listener rejecting a plaintext handshake, not a broken
+          # tunnel. `keel.py` already skips verification for https, so the CLI
+          # steps below need no special handling.
+          #
           # port-forward targets whichever pod the Service selects, so a restart
           # during rollout kills the tunnel. Re-establish it rather than fail.
           token=""
           for attempt in $(seq 1 8); do
-            kubectl -n argocd port-forward svc/argocd-server 8080:80 >/tmp/pf.log 2>&1 &
+            kubectl -n argocd port-forward svc/argocd-server 8080:443 >/tmp/pf.log 2>&1 &
             pf=$!
             for i in $(seq 1 30); do
-              if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
+              if curl -fsSk https://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
               sleep 2
             done
             body=$(curl -sS --retry 5 --retry-all-errors --retry-delay 3 \
-              -X POST http://127.0.0.1:8080/api/v1/session \
+              -X POST -k https://127.0.0.1:8080/api/v1/session \
               -H 'content-type: application/json' \
               -d "{\"username\":\"admin\",\"password\":\"${password}\"}" || true)
             token=$(printf '%s' "$body" | python -c 'import json,sys; d=sys.stdin.read().strip(); print(json.loads(d)["token"] if d[:1]=="{" else "")' 2>/dev/null || true)
@@ -130,7 +136,7 @@ jobs:
 
       - name: keel status against a live Argo CD
         env:
-          ARGOCD_SERVER: http://127.0.0.1:8080
+          ARGOCD_SERVER: https://127.0.0.1:8080
           ARGOCD_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           python cli/keel.py status --verbose
@@ -138,7 +144,7 @@ jobs:
 
       - name: Promote and measure convergence
         env:
-          ARGOCD_SERVER: http://127.0.0.1:8080
+          ARGOCD_SERVER: https://127.0.0.1:8080
           ARGOCD_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
@@ -151,7 +157,7 @@ jobs:
 
       - name: Measure a rollback
         env:
-          ARGOCD_SERVER: http://127.0.0.1:8080
+          ARGOCD_SERVER: https://127.0.0.1:8080
           ARGOCD_TOKEN: ${{ steps.token.outputs.token }}
         continue-on-error: true
         run: |
