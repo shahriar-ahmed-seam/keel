@@ -25,6 +25,20 @@ spec:
     - https://bitnami-labs.github.io/sealed-secrets
 
   destinations:
+    # The root Application writes the ApplicationSets, and they live next to the
+    # controller that reads them, so `argocd` has to be an allowed destination.
+    # Leaving it out is not a tighter policy, it is a broken bootstrap: the root
+    # app is rejected with InvalidSpecError, never syncs, and no ApplicationSet
+    # is ever created, so nothing deploys at all. A real cluster run is what
+    # caught this — no amount of schema validation would have.
+    #
+    # What keeps it narrow is that exactly one Application targets this
+    # namespace, and its source is a fixed path holding only ApplicationSets.
+    # A project-wide namespaceResourceWhitelist would be the stronger control
+    # but it applies to every destination, so it would also forbid the
+    # Deployments and Services the workloads legitimately need.
+    - server: https://kubernetes.default.svc
+      namespace: argocd
     - server: https://kubernetes.default.svc
       namespace: flywheel-*
     - server: https://kubernetes.default.svc
