@@ -168,8 +168,12 @@ jobs:
           git config user.name ci
           git config user.email ci@local
 
+          # Promote to a tag that is definitely not already there. dev tracks
+          # `main`, so promoting to `main` is correctly a no-op and asserts nothing.
+          tag="e2e-${GITHUB_RUN_ID}"
+
           before=$(grep -c 'tag:' gitops/environments/dev/env.yaml)
-          python cli/keel.py promote --app sentinel --env dev --tag main
+          python cli/keel.py promote --app sentinel --env dev --tag "$tag"
           after=$(grep -c 'tag:' gitops/environments/dev/env.yaml)
           [ "$before" = "$after" ] || { echo "::error::promote changed the file shape"; exit 1; }
 
@@ -178,12 +182,21 @@ jobs:
           # a promotion that really happened.
           changed=$(git diff --name-only | tr '\n' ' ')
           lines=$(git diff -U0 | grep -c '^[+-][^+-]' || true)
-          echo "promotion touched: ${changed} (${lines} changed lines)"
+          echo "promotion touched: ${changed}(${lines} changed lines)"
           [ "$changed" = "gitops/environments/dev/env.yaml " ] || {
             echo "::error::a promotion must touch exactly one file, got: ${changed}"; exit 1; }
           [ "$lines" = "2" ] || { echo "::error::expected one rewritten line, got ${lines}"; exit 1; }
+          grep -q "tag: ${tag}" gitops/environments/dev/env.yaml || {
+            echo "::error::the new tag was not written"; exit 1; }
 
-          grep -A1 'sentinel:' -n gitops/environments/dev/env.yaml >/dev/null
+          # Repeating it must change nothing. A promotion tool that is not
+          # idempotent turns a retried pipeline into a second deployment.
+          python cli/keel.py promote --app sentinel --env dev --tag "$tag"
+          again=$(git diff -U0 | grep -c '^[+-][^+-]' || true)
+          [ "$again" = "2" ] || {
+            echo "::error::a repeated promotion was not a no-op (${again} changed lines)"; exit 1; }
+
+          git checkout -- gitops/environments/dev/env.yaml
           python cli/keel.py status --verbose
           python cli/keel.py diff
 
