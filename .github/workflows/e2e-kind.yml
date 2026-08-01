@@ -98,45 +98,56 @@ jobs:
           password=$(kubectl -n argocd get secret argocd-initial-admin-secret \
             -o jsonpath='{.data.password}' | base64 -d)
 
-          # Argo CD serves TLS with a self-signed certificate by default, so this
-          # talks to :443 with -k. An earlier version asked for plaintext on :80
-          # and every connection came back as `curl: (56) Connection reset by
-          # peer` — a TLS listener rejecting a plaintext handshake, not a broken
-          # tunnel. `keel.py` already skips verification for https, so the CLI
-          # steps below need no special handling.
-          #
-          # port-forward targets whichever pod the Service selects, so a restart
-          # during rollout kills the tunnel. Re-establish it rather than fail.
-          token=""
-          for attempt in $(seq 1 8); do
-            kubectl -n argocd port-forward svc/argocd-server 8080:443 >/tmp/pf.log 2>&1 &
-            pf=$!
-            for i in $(seq 1 30); do
-              if curl -fsSk https://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
-              sleep 2
+          # Bind IPv4 explicitly. Left to itself kubectl also binds [::1], and if
+          # the IPv4 bind is the one that fails, kubectl keeps running and looks
+          # healthy while every `curl 127.0.0.1` fails against nothing.
+          kubectl -n argocd port-forward --address 127.0.0.1 \
+            svc/argocd-server 8080:443 >/tmp/pf.log 2>&1 &
+          sleep 5
+          cat /tmp/pf.log || true
+          ss -lnt | grep ':8080' || echo "nothing listening on 8080 yet"
+
+          # Do not assume the scheme. port-forward reaches the container port
+          # directly, so the Service's 80-vs-443 split says nothing about whether
+          # that port speaks TLS — that depends on server.insecure. Probe, and
+          # carry whichever works through to the CLI steps.
+          base=""
+          for i in $(seq 1 40); do
+            for candidate in "https://127.0.0.1:8080" "http://127.0.0.1:8080"; do
+              if curl -fsSk --max-time 5 "${candidate}/healthz" >/dev/null 2>&1; then
+                base="$candidate"
+                break
+              fi
             done
-            body=$(curl -sS --retry 5 --retry-all-errors --retry-delay 3 \
-              -X POST -k https://127.0.0.1:8080/api/v1/session \
-              -H 'content-type: application/json' \
-              -d "{\"username\":\"admin\",\"password\":\"${password}\"}" || true)
-            token=$(printf '%s' "$body" | python -c 'import json,sys; d=sys.stdin.read().strip(); print(json.loads(d)["token"] if d[:1]=="{" else "")' 2>/dev/null || true)
-            if [ -n "$token" ]; then break; fi
-            echo "attempt ${attempt}: no token yet; response was: ${body:0:200}"
-            cat /tmp/pf.log || true
-            kill "$pf" 2>/dev/null || true
-            sleep 5
+            if [ -n "$base" ]; then break; fi
+            sleep 3
           done
 
-          if [ -z "$token" ]; then
-            echo "::error::could not obtain an Argo CD API token"
+          if [ -z "$base" ]; then
+            echo "::error::argocd-server unreachable through the port-forward"
+            echo "--- https attempt ---"; curl -vk --max-time 10 https://127.0.0.1:8080/healthz || true
+            echo "--- http attempt ---";  curl -v  --max-time 10 http://127.0.0.1:8080/healthz  || true
+            echo "--- port-forward log ---"; cat /tmp/pf.log || true
+            echo "--- listeners ---"; ss -lnt || true
+            echo "--- server pod ---"; kubectl -n argocd get pods -l app.kubernetes.io/name=argocd-server -o wide || true
+            kubectl -n argocd logs deploy/argocd-server --tail=80 || true
             exit 1
           fi
+          echo "argocd-server reachable over ${base}"
+
+          body=$(curl -fsSk --retry 5 --retry-all-errors --retry-delay 3 \
+            -X POST "${base}/api/v1/session" \
+            -H 'content-type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"${password}\"}")
+          token=$(printf '%s' "$body" | python -c 'import json,sys;print(json.load(sys.stdin)["token"])')
+
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
 
       - name: keel status against a live Argo CD
         env:
-          ARGOCD_SERVER: https://127.0.0.1:8080
+          ARGOCD_SERVER: ${{ steps.token.outputs.base }}
           ARGOCD_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           python cli/keel.py status --verbose
@@ -144,7 +155,7 @@ jobs:
 
       - name: Promote and measure convergence
         env:
-          ARGOCD_SERVER: https://127.0.0.1:8080
+          ARGOCD_SERVER: ${{ steps.token.outputs.base }}
           ARGOCD_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
@@ -157,7 +168,7 @@ jobs:
 
       - name: Measure a rollback
         env:
-          ARGOCD_SERVER: https://127.0.0.1:8080
+          ARGOCD_SERVER: ${{ steps.token.outputs.base }}
           ARGOCD_TOKEN: ${{ steps.token.outputs.token }}
         continue-on-error: true
         run: |
