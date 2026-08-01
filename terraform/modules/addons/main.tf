@@ -48,8 +48,8 @@ resource "helm_release" "ingress_nginx" {
       # kind exposes 80/443 on the control-plane node via extraPortMappings.
       hostPort = { enabled = true }
       config = {
-        "proxy-buffering"      = "off"
-        "proxy-read-timeout"   = "3600"
+        "proxy-buffering"       = "off"
+        "proxy-read-timeout"    = "3600"
         "use-forwarded-headers" = "true"
       }
       admissionWebhooks = { enabled = false }
@@ -119,18 +119,18 @@ resource "helm_release" "prometheus_stack" {
     crds = { enabled = true }
     prometheus = {
       prometheusSpec = {
-        retention                              = "6h"
+        retention                               = "6h"
         serviceMonitorSelectorNilUsesHelmValues = false
         ruleSelectorNilUsesHelmValues           = false
-        resources = { requests = { cpu = "100m", memory = "512Mi" } }
+        resources                               = { requests = { cpu = "100m", memory = "512Mi" } }
       }
     }
     grafana      = { adminPassword = "prom-operator" }
     alertmanager = { enabled = false }
     # Node-level exporters are noise on a single-node kind cluster.
-    nodeExporter          = { enabled = false }
-    kubeStateMetrics      = { enabled = true }
-    prometheusOperator    = { admissionWebhooks = { enabled = false } }
+    nodeExporter       = { enabled = false }
+    kubeStateMetrics   = { enabled = true }
+    prometheusOperator = { admissionWebhooks = { enabled = false } }
   })]
 }
 

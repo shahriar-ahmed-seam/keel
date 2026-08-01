@@ -4,6 +4,15 @@
 # environment is a directory, not a code change. Each application's manifests
 # come from *its own repository* — this repo holds desired state, never a copy of
 # someone else's Kubernetes YAML.
+#
+# Two things below live in `templatePatch` rather than `template`, and it is not a
+# style choice. An ApplicationSet is parsed as YAML *before* any templating runs,
+# and Go templates are then evaluated only inside string values. Block constructs
+# like `range` and `if` in `template` are therefore not templating at all — they
+# are a syntax error, which is exactly how this file used to fail validation.
+# `templatePatch` is a string, so the whole block is templated as text and merged
+# over the rendered Application. Argo documents it for precisely these two cases:
+# a conditional `automated` policy, and generating a list.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -46,12 +55,6 @@ spec:
         targetRevision: "{{ (index .apps .app).targetRevision }}"
         path: "{{ (index .apps .app).path }}"
         kustomize:
-          # The promotion surface: CI rewrites `tag` in env.yaml and Argo
-          # rewrites every image reference in the overlay to match.
-          images:
-            {{- range $name, $image := (index .apps .app).images }}
-            - "{{ $image }}:{{ (index $.apps $.app).tag }}"
-            {{- end }}
           commonAnnotations:
             keel.somokolonlabs.com/env: "{{ .env }}"
             keel.somokolonlabs.com/revision: "{{ (index .apps .app).tag }}"
@@ -59,12 +62,6 @@ spec:
         server: "{{ .cluster }}"
         namespace: "{{ (index .apps .app).namespace }}"
       syncPolicy:
-        {{- if .autoSync }}
-        automated:
-          prune: {{ .prune }}
-          selfHeal: {{ .selfHeal }}
-          allowEmpty: false
-        {{- end }}
         syncOptions:
           - CreateNamespace=true
           - ServerSideApply=true
@@ -93,3 +90,27 @@ spec:
           value: "{{ .env }}"
         - name: url
           value: "https://{{ (index .apps .app).host }}"
+
+  # The promotion surface: CI rewrites `tag` in env.yaml and Argo rewrites every
+  # image reference in the overlay to match. Ranging over the map keeps an app
+  # free to ship any number of images under any names — flywheel calls its server
+  # image `api`, sentinel calls its `gateway` — without touching this file.
+  #
+  # `automated` has to be absent, not false, for a manual environment: its mere
+  # presence is what turns auto-sync on. prod sets `autoSync: false` and so gets
+  # rendered manifests plus an OutOfSync badge, waiting for a human.
+  templatePatch: |
+    spec:
+      source:
+        kustomize:
+          images:
+          {{- range $name, $image := (index .apps .app).images }}
+            - "{{ $image }}:{{ (index $.apps $.app).tag }}"
+          {{- end }}
+    {{- if .autoSync }}
+      syncPolicy:
+        automated:
+          prune: {{ .prune }}
+          selfHeal: {{ .selfHeal }}
+          allowEmpty: false
+    {{- end }}

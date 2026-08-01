@@ -70,8 +70,8 @@ variable "manage_addons_with_terraform" {
     Set true only for a throwaway local cluster where you want Terraform to
     install them directly and skip the GitOps round trip.
   EOT
-  type    = bool
-  default = false
+  type        = bool
+  default     = false
 }
 
 variable "install_rollouts_dashboard" {

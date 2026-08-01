@@ -14,7 +14,11 @@ output "argocd_url" {
 
 output "initial_admin_password_command" {
   description = "How to read the generated admin password when none was supplied."
-  value = var.argocd_admin_password_bcrypt == "" ? "kubectl -n ${var.argocd_namespace} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d" : "set explicitly via argocd_admin_password_bcrypt"
+  # The hash is a sensitive variable, so anything derived from it is sensitive
+  # too and Terraform refuses to output it. What this output needs is one bit —
+  # was a password supplied — so unwrap only the comparison, never the value.
+  # Marking the whole output sensitive would hide the command it exists to print.
+  value = nonsensitive(var.argocd_admin_password_bcrypt == "") ? "kubectl -n ${var.argocd_namespace} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d" : "set explicitly via argocd_admin_password_bcrypt"
 }
 
 output "gitops_repo" {

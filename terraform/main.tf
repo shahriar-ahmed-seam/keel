@@ -44,11 +44,11 @@ resource "helm_release" "argocd" {
   namespace  = kubernetes_namespace_v1.bootstrap[var.argocd_namespace].metadata[0].name
 
   # Bootstrap should either work or fail loudly, not hang forever.
-  timeout          = 900
-  atomic           = true
-  cleanup_on_fail  = true
-  wait             = true
-  wait_for_jobs    = true
+  timeout         = 900
+  atomic          = true
+  cleanup_on_fail = true
+  wait            = true
+  wait_for_jobs   = true
 
   values = [
     yamlencode({
@@ -64,7 +64,7 @@ resource "helm_release" "argocd" {
           "applicationsetcontroller.enable.progressive.syncs" = true
         }
         cm = {
-          "timeout.reconciliation" = "120s"
+          "timeout.reconciliation"             = "120s"
           "application.resourceTrackingMethod" = "annotation"
           # Long-running jobs (training runs, load tests) must not be pruned
           # mid-flight by a reconcile.
@@ -85,7 +85,7 @@ resource "helm_release" "argocd" {
       controller = {
         replicas = 1
         metrics = {
-          enabled = true
+          enabled        = true
           serviceMonitor = { enabled = true }
         }
         resources = {
@@ -96,7 +96,7 @@ resource "helm_release" "argocd" {
       repoServer = {
         replicas = 2
         metrics = {
-          enabled = true
+          enabled        = true
           serviceMonitor = { enabled = true }
         }
       }
@@ -104,7 +104,7 @@ resource "helm_release" "argocd" {
       applicationSet = {
         replicas = 1
         metrics = {
-          enabled = true
+          enabled        = true
           serviceMonitor = { enabled = true }
         }
       }
@@ -112,7 +112,7 @@ resource "helm_release" "argocd" {
       notifications = {
         enabled = true
         metrics = {
-          enabled = true
+          enabled        = true
           serviceMonitor = { enabled = true }
         }
       }
@@ -120,11 +120,15 @@ resource "helm_release" "argocd" {
       server = {
         replicas = 2
         metrics = {
-          enabled = true
+          enabled        = true
           serviceMonitor = { enabled = true }
         }
-        ingress = var.argocd_hostname == "" ? { enabled = false } : {
-          enabled          = true
+        # Both branches must describe the same object type — Terraform unifies
+        # the two arms of a conditional, so an arm that omits `annotations`
+        # is a type error rather than an empty ingress. Keeping the shape
+        # identical and flipping `enabled` says the same thing and validates.
+        ingress = {
+          enabled          = var.argocd_hostname != ""
           ingressClassName = "nginx"
           hostname         = var.argocd_hostname
           annotations = {
@@ -132,7 +136,7 @@ resource "helm_release" "argocd" {
             "nginx.ingress.kubernetes.io/backend-protocol"   = "HTTP"
             "nginx.ingress.kubernetes.io/force-ssl-redirect" = "true"
           }
-          tls = true
+          tls = var.argocd_hostname != ""
         }
       }
 
@@ -146,8 +150,14 @@ resource "helm_release" "argocd" {
 }
 
 # Private repository credentials, only if any were supplied.
+#
+# The variable is sensitive as a whole, and Terraform refuses sensitive values in
+# `for_each` because each key becomes part of a resource address in state and in
+# plan output. Only the repository URLs are needed as keys, and a repo URL is not
+# a secret, so unwrap just the key set. The username and password are still read
+# through the sensitive variable and stay redacted in plans.
 resource "kubernetes_secret_v1" "repo_credentials" {
-  for_each = var.repo_credentials
+  for_each = nonsensitive(toset(keys(var.repo_credentials)))
 
   metadata {
     name      = "repo-${md5(each.key)}"
@@ -160,8 +170,8 @@ resource "kubernetes_secret_v1" "repo_credentials" {
   data = {
     type     = "git"
     url      = each.key
-    username = each.value.username
-    password = each.value.password
+    username = var.repo_credentials[each.key].username
+    password = var.repo_credentials[each.key].password
   }
 
   depends_on = [helm_release.argocd]
@@ -173,15 +183,15 @@ resource "kubernetes_secret_v1" "repo_credentials" {
 # The project boundary and the root Application are applied from the files in
 # this repository so there is exactly one definition of each.
 resource "kubectl_manifest" "appproject" {
-  yaml_body          = file("${path.module}/../gitops/bootstrap/appproject.yaml")
-  server_side_apply  = true
-  wait               = true
+  yaml_body         = file("${path.module}/../gitops/bootstrap/appproject.yaml")
+  server_side_apply = true
+  wait              = true
 
   depends_on = [helm_release.argocd]
 }
 
 resource "kubectl_manifest" "root_application" {
-  yaml_body         = replace(
+  yaml_body = replace(
     file("${path.module}/../gitops/bootstrap/root.yaml"),
     "https://github.com/shahriar-ahmed-seam/keel.git",
     var.gitops_repo_url,
