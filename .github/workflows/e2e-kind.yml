@@ -172,8 +172,14 @@ jobs:
           # `main`, so promoting to `main` is correctly a no-op and asserts nothing.
           tag="e2e-${GITHUB_RUN_ID}"
 
+          # --no-commit --dry-run runs the real line-rewriting path and stops
+          # before contacting Argo, leaving the edit in the working tree to assert
+          # against. A plain promote waits for the app to converge, which cannot
+          # happen here; that part is measured in the informational step below.
+          # The live Argo API is exercised separately by status and diff.
           before=$(grep -c 'tag:' gitops/environments/dev/env.yaml)
-          python cli/keel.py promote --app sentinel --env dev --tag "$tag"
+          python cli/keel.py promote --app sentinel --env dev --tag "$tag" \
+            --no-commit --dry-run
           after=$(grep -c 'tag:' gitops/environments/dev/env.yaml)
           [ "$before" = "$after" ] || { echo "::error::promote changed the file shape"; exit 1; }
 
@@ -191,7 +197,8 @@ jobs:
 
           # Repeating it must change nothing. A promotion tool that is not
           # idempotent turns a retried pipeline into a second deployment.
-          python cli/keel.py promote --app sentinel --env dev --tag "$tag"
+          python cli/keel.py promote --app sentinel --env dev --tag "$tag" \
+            --no-commit --dry-run
           again=$(git diff -U0 | grep -c '^[+-][^+-]' || true)
           [ "$again" = "2" ] || {
             echo "::error::a repeated promotion was not a no-op (${again} changed lines)"; exit 1; }
@@ -211,7 +218,11 @@ jobs:
           ARGOCD_TOKEN: ${{ steps.token.outputs.token }}
         continue-on-error: true
         run: |
-          python cli/keel.py wait --app sentinel --env dev --timeout 300
+          set -euo pipefail
+          git config user.name ci
+          git config user.email ci@local
+          python cli/keel.py promote \
+            --app sentinel --env dev --tag main --force --sync --timeout 420
           python cli/keel.py rollback --app sentinel --env dev --timeout 300
 
       - name: Timings
