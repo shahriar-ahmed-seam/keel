@@ -178,8 +178,7 @@ jobs:
           # happen here; that part is measured in the informational step below.
           # The live Argo API is exercised separately by status and diff.
           before=$(grep -c 'tag:' gitops/environments/dev/env.yaml)
-          python cli/keel.py promote --app sentinel --env dev --tag "$tag" \
-            --no-commit --dry-run
+          python cli/keel.py --dry-run promote --app sentinel --env dev --tag "$tag" --no-commit
           after=$(grep -c 'tag:' gitops/environments/dev/env.yaml)
           [ "$before" = "$after" ] || { echo "::error::promote changed the file shape"; exit 1; }
 
@@ -197,8 +196,7 @@ jobs:
 
           # Repeating it must change nothing. A promotion tool that is not
           # idempotent turns a retried pipeline into a second deployment.
-          python cli/keel.py promote --app sentinel --env dev --tag "$tag" \
-            --no-commit --dry-run
+          python cli/keel.py --dry-run promote --app sentinel --env dev --tag "$tag" --no-commit
           again=$(git diff -U0 | grep -c '^[+-][^+-]' || true)
           [ "$again" = "2" ] || {
             echo "::error::a repeated promotion was not a no-op (${again} changed lines)"; exit 1; }
