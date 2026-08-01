@@ -67,6 +67,12 @@ spec:
           - ServerSideApply=true
           - PrunePropagationPolicy=foreground
           - RespectIgnoreDifferences=true
+          # An app ships a ServiceMonitor, whose CRD arrives with the
+          # kube-prometheus-stack add-on. On a fresh cluster the workloads are
+          # dry-run before that add-on finishes, and the unknown kind fails the
+          # whole sync with "one or more synchronization tasks are not valid" —
+          # a chicken-and-egg that sync waves cannot fix across projects.
+          - SkipDryRunOnMissingResource=true
         managedNamespaceMetadata:
           labels:
             pod-security.kubernetes.io/enforce: restricted
