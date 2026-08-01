@@ -1,0 +1,78 @@
+# Upstream cluster add-ons live in their own project, separate from our own
+# workloads, because they need permissions our workloads must never have.
+#
+# Every add-on chart creates its own ServiceAccount — cert-manager, ingress-nginx,
+# KEDA, kube-prometheus-stack and argo-rollouts all do. The `keel` project
+# forbids ServiceAccount so that an application repository cannot mint cluster
+# credentials for itself, and that restriction is worth keeping: our own
+# Deployments run on the namespace default and need no ServiceAccount at all.
+#
+# A project-wide blacklist cannot make exceptions per application, so a single
+# project has to choose: forbid ServiceAccount and no add-on can ever sync, or
+# permit it and every workload gains the same right. Two projects is how the
+# boundary survives — trusted, version-pinned upstream charts here, our own code
+# next door under the strict rules.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: keel-addons
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Pinned upstream cluster add-ons
+
+  # Charts only. This project cannot deploy application code, so a compromised
+  # app repository cannot reach these elevated permissions by changing a path.
+  sourceRepos:
+    - https://kubernetes.github.io/ingress-nginx
+    - https://charts.jetstack.io
+    - https://prometheus-community.github.io/helm-charts
+    - https://grafana.github.io/helm-charts
+    - https://kedacore.github.io/charts
+    - https://argoproj.github.io/argo-helm
+    - https://bitnami-labs.github.io/sealed-secrets
+
+  # Add-on namespaces only. Notably absent: argocd, flywheel-* and sentinel-*.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: observability
+    - server: https://kubernetes.default.svc
+      namespace: ingress-nginx
+    - server: https://kubernetes.default.svc
+      namespace: cert-manager
+    - server: https://kubernetes.default.svc
+      namespace: keda
+    - server: https://kubernetes.default.svc
+      namespace: argo-rollouts
+    - server: https://kubernetes.default.svc
+      namespace: sealed-secrets
+
+  # Operators legitimately need cluster scope: CRDs for their own types, RBAC to
+  # watch the cluster, webhook configurations to validate it.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+    - group: storage.k8s.io
+      kind: StorageClass
+    - group: cert-manager.io
+      kind: ClusterIssuer
+    - group: monitoring.coreos.com
+      kind: "*"
+    - group: scheduling.k8s.io
+      kind: PriorityClass
+    - group: apiregistration.k8s.io
+      kind: APIService
+
+  orphanedResources:
+    warn: true

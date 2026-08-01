@@ -183,7 +183,12 @@ resource "kubernetes_secret_v1" "repo_credentials" {
 # The project boundary and the root Application are applied from the files in
 # this repository so there is exactly one definition of each.
 resource "kubectl_manifest" "appproject" {
-  yaml_body         = file("${path.module}/../gitops/bootstrap/appproject.yaml")
+  for_each = toset([
+    "appproject.yaml",        # our workloads, strict
+    "appproject-addons.yaml", # pinned upstream charts, elevated on purpose
+  ])
+
+  yaml_body         = file("${path.module}/../gitops/bootstrap/${each.key}")
   server_side_apply = true
   wait              = true
 

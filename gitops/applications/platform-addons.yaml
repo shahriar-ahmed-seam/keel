@@ -114,7 +114,10 @@ spec:
       annotations:
         argocd.argoproj.io/sync-wave: "{{ .wave }}"
     spec:
-      project: keel
+      # keel-addons, not keel: upstream charts create their own ServiceAccounts,
+      # which the workloads project forbids on purpose. See
+      # gitops/bootstrap/appproject-addons.yaml.
+      project: keel-addons
       source:
         repoURL: "{{ .repo }}"
         chart: "{{ .chart }}"

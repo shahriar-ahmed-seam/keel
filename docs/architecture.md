@@ -163,7 +163,15 @@ can come up — at the cost of needing the controller's key backed up. External
 Secrets with a cloud KMS is the right answer once there is a cloud account worth
 binding to, and swapping is one add-on entry.
 
-The `AppProject` blacklists `ServiceAccount` creation from namespaced resources,
+There are two `AppProject`s, and the split is the point. `keel` holds our own
+workloads and blacklists `ServiceAccount`, so an application repository cannot
+mint cluster credentials for itself. `keel-addons` holds the pinned upstream
+charts, which all create ServiceAccounts and legitimately need to. A blacklist is
+project-wide with no per-application exception, so one project would have had to
+either block the add-ons from ever syncing or hand every workload the same
+right — a real cluster run is what made that concrete.
+
+The `keel` project blacklists `ServiceAccount` creation from namespaced resources,
 so nothing in Git can quietly mint long-lived cluster credentials.
 
 ---

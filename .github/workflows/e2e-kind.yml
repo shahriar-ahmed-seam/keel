@@ -50,6 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           kubectl apply -f gitops/bootstrap/appproject.yaml
+          kubectl apply -f gitops/bootstrap/appproject-addons.yaml
           kubectl apply -f gitops/bootstrap/root.yaml
           # Wait for the root Application to render the ApplicationSets.
           for i in $(seq 1 40); do
@@ -80,16 +81,50 @@ jobs:
         id: token
         run: |
           set -euo pipefail
-          kubectl -n argocd port-forward svc/argocd-server 8080:80 >/tmp/pf.log 2>&1 &
-          for i in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break || sleep 2
+
+          # A ready Deployment is not the same as a server that can sign a JWT.
+          # argocd-server generates `server.secretkey` into argocd-secret on first
+          # start; until it exists, /api/v1/session drops the connection rather
+          # than answering, which reads as `curl: (56) Connection reset by peer`.
+          kubectl -n argocd rollout status deploy/argocd-server --timeout=300s
+          for i in $(seq 1 60); do
+            if kubectl -n argocd get secret argocd-secret \
+                 -o jsonpath='{.data.server\.secretkey}' 2>/dev/null | grep -q .; then
+              echo "server.secretkey present"
+              break
+            fi
+            sleep 5
           done
+
           password=$(kubectl -n argocd get secret argocd-initial-admin-secret \
             -o jsonpath='{.data.password}' | base64 -d)
-          token=$(curl -fsS -X POST http://127.0.0.1:8080/api/v1/session \
-            -H 'content-type: application/json' \
-            -d "{\"username\":\"admin\",\"password\":\"${password}\"}" \
-            | python -c 'import json,sys;print(json.load(sys.stdin)["token"])')
+
+          # port-forward targets whichever pod the Service selects, so a restart
+          # during rollout kills the tunnel. Re-establish it rather than fail.
+          token=""
+          for attempt in $(seq 1 8); do
+            kubectl -n argocd port-forward svc/argocd-server 8080:80 >/tmp/pf.log 2>&1 &
+            pf=$!
+            for i in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
+              sleep 2
+            done
+            body=$(curl -sS --retry 5 --retry-all-errors --retry-delay 3 \
+              -X POST http://127.0.0.1:8080/api/v1/session \
+              -H 'content-type: application/json' \
+              -d "{\"username\":\"admin\",\"password\":\"${password}\"}" || true)
+            token=$(printf '%s' "$body" | python -c 'import json,sys; d=sys.stdin.read().strip(); print(json.loads(d)["token"] if d[:1]=="{" else "")' 2>/dev/null || true)
+            if [ -n "$token" ]; then break; fi
+            echo "attempt ${attempt}: no token yet; response was: ${body:0:200}"
+            cat /tmp/pf.log || true
+            kill "$pf" 2>/dev/null || true
+            sleep 5
+          done
+
+          if [ -z "$token" ]; then
+            echo "::error::could not obtain an Argo CD API token"
+            exit 1
+          fi
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
 

@@ -148,6 +148,7 @@ keel/
 ├─ gitops/
 │  ├─ bootstrap/
 │  │  ├─ appproject.yaml        the blast-radius boundary, allow-listed
+│  │  ├─ appproject-addons.yaml upstream charts, elevated on purpose
 │  │  └─ root.yaml              the one Application applied by hand
 │  ├─ applications/
 │  │  ├─ platform-addons.yaml   pinned upstream charts, ordered by sync wave
