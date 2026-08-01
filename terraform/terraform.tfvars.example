@@ -1,0 +1,24 @@
+# Copy to terraform.tfvars (gitignored) and adjust.
+
+kube_context = "kind-keel"
+
+gitops_repo_url = "https://github.com/shahriar-ahmed-seam/keel.git"
+gitops_revision = "main"
+
+# Empty means no ingress; reach the UI with a port-forward instead.
+argocd_hostname = ""
+
+# htpasswd -nbBC 10 "" 'your-password' | tr -d ':\n' | sed 's/$2y/$2a/'
+# argocd_admin_password_bcrypt = "$2a$10$..."
+
+# true only for throwaway clusters. In a real environment Argo CD owns the
+# add-ons via gitops/applications/platform-addons.yaml.
+manage_addons_with_terraform = false
+
+# Only needed if an application repository is private.
+# repo_credentials = {
+#   "https://github.com/org/private-app.git" = {
+#     username = "x-access-token"
+#     password = "ghp_..."
+#   }
+# }

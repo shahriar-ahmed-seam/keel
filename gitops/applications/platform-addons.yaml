@@ -1,0 +1,143 @@
+# Cluster add-ons as declared upstream charts, ordered by sync wave so CRDs
+# exist before anything that references them. Nothing is vendored into this
+# repository — the chart version is the pin.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform-addons
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - list:
+        elements:
+          - name: sealed-secrets
+            wave: "-5"
+            repo: https://bitnami-labs.github.io/sealed-secrets
+            chart: sealed-secrets
+            version: 2.17.0
+            namespace: sealed-secrets
+            values: |
+              fullnameOverride: sealed-secrets-controller
+
+          - name: cert-manager
+            wave: "-4"
+            repo: https://charts.jetstack.io
+            chart: cert-manager
+            version: v1.16.2
+            namespace: cert-manager
+            values: |
+              crds:
+                enabled: true
+              global:
+                leaderElection:
+                  namespace: cert-manager
+
+          - name: ingress-nginx
+            wave: "-3"
+            repo: https://kubernetes.github.io/ingress-nginx
+            chart: ingress-nginx
+            version: 4.12.0
+            namespace: ingress-nginx
+            values: |
+              controller:
+                replicaCount: 2
+                metrics:
+                  enabled: true
+                  serviceMonitor:
+                    enabled: true
+                config:
+                  # Streaming endpoints must not be buffered.
+                  proxy-buffering: "off"
+                  proxy-read-timeout: "3600"
+                  use-forwarded-headers: "true"
+                  enable-real-ip: "true"
+
+          - name: kube-prometheus-stack
+            wave: "-2"
+            repo: https://prometheus-community.github.io/helm-charts
+            chart: kube-prometheus-stack
+            version: 67.5.0
+            namespace: observability
+            values: |
+              crds:
+                enabled: true
+              prometheus:
+                prometheusSpec:
+                  retention: 15d
+                  serviceMonitorSelectorNilUsesHelmValues: false
+                  ruleSelectorNilUsesHelmValues: false
+                  resources:
+                    requests: { cpu: 200m, memory: 1Gi }
+              grafana:
+                adminPassword: prom-operator
+                sidecar:
+                  dashboards:
+                    enabled: true
+                    searchNamespaces: ALL
+              alertmanager:
+                enabled: true
+
+          - name: keda
+            wave: "-1"
+            repo: https://kedacore.github.io/charts
+            chart: keda
+            version: 2.16.1
+            namespace: keda
+            values: |
+              prometheus:
+                metricServer:
+                  enabled: true
+                operator:
+                  enabled: true
+
+          - name: argo-rollouts
+            wave: "-1"
+            repo: https://argoproj.github.io/argo-helm
+            chart: argo-rollouts
+            version: 2.38.2
+            namespace: argo-rollouts
+            values: |
+              installCRDs: true
+              dashboard:
+                enabled: true
+              controller:
+                metrics:
+                  enabled: true
+                  serviceMonitor:
+                    enabled: true
+
+  template:
+    metadata:
+      name: "addon-{{ .name }}"
+      annotations:
+        argocd.argoproj.io/sync-wave: "{{ .wave }}"
+    spec:
+      project: keel
+      source:
+        repoURL: "{{ .repo }}"
+        chart: "{{ .chart }}"
+        targetRevision: "{{ .version }}"
+        helm:
+          releaseName: "{{ .name }}"
+          values: |
+            {{ .values | nindent 12 }}
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{ .namespace }}"
+      syncPolicy:
+        automated:
+          prune: false      # add-ons are not pruned automatically: too blunt
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+          - SkipDryRunOnMissingResource=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 15s
+            factor: 2
+            maxDuration: 5m
+      revisionHistoryLimit: 5

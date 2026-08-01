@@ -1,0 +1,136 @@
+# Automated canary analysis. The point of these templates is that a rollout is
+# gated on the metrics the application already exports, not on a human watching
+# a dashboard for ten minutes.
+#
+# Both apps expose Prometheus metrics; these queries are the same ones their
+# own alert rules use, so a rollout is judged by the same standard as production.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: gateway-success-rate
+  namespace: argo-rollouts
+spec:
+  args:
+    - name: service
+    - name: namespace
+  metrics:
+    - name: error-ratio
+      # Give the canary a moment to receive traffic before judging it.
+      initialDelay: 60s
+      interval: 30s
+      count: 8
+      # Two consecutive failures end the rollout; one is noise.
+      failureLimit: 1
+      consecutiveErrorLimit: 2
+      successCondition: result[0] <= 0.02
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.observability.svc:9090
+          query: |
+            sum(rate(sentinel_inferences_total{status!="ok",namespace="{{args.namespace}}"}[2m]))
+            /
+            clamp_min(sum(rate(sentinel_inferences_total{namespace="{{args.namespace}}"}[2m])), 1e-9)
+
+    - name: ttft-p95
+      initialDelay: 60s
+      interval: 30s
+      count: 8
+      failureLimit: 1
+      successCondition: result[0] <= 2.5
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.observability.svc:9090
+          query: |
+            histogram_quantile(
+              0.95,
+              sum(rate(sentinel_time_to_first_token_seconds_bucket{namespace="{{args.namespace}}"}[2m])) by (le)
+            )
+
+    - name: no-open-circuits
+      initialDelay: 90s
+      interval: 30s
+      count: 6
+      failureLimit: 1
+      successCondition: result[0] == 0
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.observability.svc:9090
+          query: |
+            count(sentinel_circuit_state{namespace="{{args.namespace}}"} == 2) or vector(0)
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: control-plane-health
+  namespace: argo-rollouts
+spec:
+  args:
+    - name: namespace
+  metrics:
+    - name: http-error-ratio
+      initialDelay: 45s
+      interval: 30s
+      count: 6
+      failureLimit: 1
+      successCondition: result[0] <= 0.02
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.observability.svc:9090
+          query: |
+            sum(rate(flywheel_http_requests_total{status=~"5..",namespace="{{args.namespace}}"}[2m]))
+            /
+            clamp_min(sum(rate(flywheel_http_requests_total{namespace="{{args.namespace}}"}[2m])), 1e-9)
+
+    - name: latency-p95
+      initialDelay: 45s
+      interval: 30s
+      count: 6
+      failureLimit: 1
+      successCondition: result[0] <= 1.0
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.observability.svc:9090
+          query: |
+            histogram_quantile(
+              0.95,
+              sum(rate(flywheel_http_request_duration_seconds_bucket{namespace="{{args.namespace}}"}[2m])) by (le)
+            )
+---
+# Smoke test as a Job: proves the new pods answer a real request before any
+# meaningful share of traffic is pointed at them.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: gateway-smoke
+  namespace: argo-rollouts
+spec:
+  args:
+    - name: service
+    - name: namespace
+  metrics:
+    - name: completion-smoke
+      count: 1
+      provider:
+        job:
+          spec:
+            backoffLimit: 1
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: smoke
+                    image: curlimages/curl:8.11.1
+                    args:
+                      - sh
+                      - -c
+                      - |
+                        set -eu
+                        BASE="http://{{args.service}}.{{args.namespace}}.svc:8000"
+                        curl -fsS "$BASE/health/ready" | grep -q '"status":"ready"'
+                        curl -fsS -X POST "$BASE/v1/chat/completions" \
+                          -H 'content-type: application/json' \
+                          -d '{"model":"sim-nano","messages":[{"role":"user","content":"ping"}],"max_tokens":16}' \
+                          | grep -q '"object": *"chat.completion"'
+                        echo "smoke ok"

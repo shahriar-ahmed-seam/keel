@@ -1,0 +1,153 @@
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.3
+
+      - name: Format
+        run: terraform fmt -check -recursive
+
+      - name: Init (no backend)
+        run: terraform init -backend=false -input=false
+
+      - name: Validate
+        run: terraform validate -no-color
+
+      - name: Validate modules
+        run: |
+          for module in modules/*/; do
+            echo "== $module"
+            terraform -chdir="$module" init -backend=false -input=false
+            terraform -chdir="$module" validate -no-color
+          done
+
+  manifests:
+    name: manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xzf kubeconform.tar.gz kubeconform
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: Validate Argo CD and Rollouts manifests
+        run: |
+          # Argo CD, ApplicationSet, Rollouts and KEDA schemas come from the
+          # community CRD catalogue rather than the core Kubernetes set.
+          SCHEMA='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          kubeconform \
+            -strict -summary \
+            -schema-location default \
+            -schema-location "$SCHEMA" \
+            -ignore-missing-schemas \
+            gitops/bootstrap gitops/applications rollouts
+
+      - name: Reject unpinned chart versions
+        run: |
+          # A GitOps repo without version pins is a repo that redeploys itself
+          # when an upstream publishes.
+          if grep -rnE 'targetRevision:\s*(HEAD|main|master|\*)\s*$' gitops/applications; then
+            echo "::error::third-party chart Applications must pin a version"
+            exit 1
+          fi
+          echo "all add-on charts are pinned"
+
+      - name: Environment files are well formed
+        run: |
+          python - <<'PY'
+          import pathlib, sys, re
+          required = {"env", "cluster", "autoSync", "prune", "selfHeal", "apps"}
+          apps_required = {"repoURL", "targetRevision", "path", "namespace", "tag", "images"}
+          failures = []
+          for path in sorted(pathlib.Path("gitops/environments").glob("*/env.yaml")):
+              text = path.read_text()
+              top = set(re.findall(r"^([a-zA-Z_]+):", text, re.MULTILINE))
+              missing = required - top
+              if missing:
+                  failures.append(f"{path}: missing top-level keys {sorted(missing)}")
+              for app in re.findall(r"^  ([a-z][\w-]*):\s*$", text, re.MULTILINE):
+                  block = text.split(f"  {app}:", 1)[1]
+                  nxt = re.search(r"^  \S", block, re.MULTILINE)
+                  block = block[: nxt.start()] if nxt else block
+                  keys = set(re.findall(r"^    ([a-zA-Z_]+):", block, re.MULTILINE))
+                  gap = apps_required - keys
+                  if gap:
+                      failures.append(f"{path}:{app}: missing {sorted(gap)}")
+              print(f"ok {path}")
+          if failures:
+              print("\n".join(f"::error::{f}" for f in failures))
+              sys.exit(1)
+          PY
+
+  cli:
+    name: cli
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Lint
+        run: |
+          pip install ruff==0.8.4
+          ruff check cli
+          ruff format --check cli
+
+      - name: Promote writes exactly one line
+        run: |
+          before=$(git rev-parse HEAD)
+          python cli/keel.py --dry-run promote \
+            --app sentinel --env staging --tag sha-deadbee --no-commit
+          # The diff must touch one file and one line, or the rewrite is unsafe.
+          changed=$(git diff --name-only | tr '\n' ' ')
+          lines=$(git diff --unified=0 | grep -cE '^\+[^+]' || true)
+          echo "changed: $changed  added lines: $lines"
+          test "$changed" = "gitops/environments/staging/env.yaml " || {
+            echo "::error::promote touched unexpected files: $changed"; exit 1; }
+          test "$lines" = "1" || { echo "::error::promote changed $lines lines, expected 1"; exit 1; }
+          git checkout -- gitops/environments/staging/env.yaml
+          test "$(git rev-parse HEAD)" = "$before"
+
+      - name: Commands are wired up
+        run: |
+          python cli/keel.py --help
+          python cli/keel.py --dry-run status
+          python cli/keel.py --dry-run diff
+          python cli/keel.py timings
+
+  shell:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck -x scripts/*.sh

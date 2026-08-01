@@ -1,0 +1,117 @@
+# Progressive delivery for the Sentinel gateway.
+#
+# This is an *opt-in alternative* to the plain Deployment the app repo ships.
+# Apply it in an environment that wants automated canary analysis; the Deployment
+# and the Rollout must not both manage the same pods, so `keel` swaps one for the
+# other rather than layering them.
+#
+# Traffic shifting here uses the ingress-nginx canary annotations that Argo
+# Rollouts drives directly — no service mesh required.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: sentinel-gateway
+  annotations:
+    notifications.argoproj.io/subscribe.on-rollout-aborted.slack: platform-alerts
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-gateway
+  workloadRef:
+    # Pod spec stays in the application repository. This file owns the *strategy*,
+    # not the container definition — otherwise the two drift.
+    apiVersion: apps/v1
+    kind: Deployment
+    name: sentinel-gateway
+    scaleDown: onsuccess
+
+  strategy:
+    canary:
+      canaryService: sentinel-gateway-canary
+      stableService: sentinel-gateway-stable
+      trafficRouting:
+        nginx:
+          stableIngress: sentinel
+      # Judge before widening, and keep the earliest step small enough that a
+      # bad build affects a minority of callers for a bounded time.
+      steps:
+        - setWeight: 5
+        - analysis:
+            templates:
+              - templateName: gateway-smoke
+            args:
+              - name: service
+                value: sentinel-gateway-canary
+              - name: namespace
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+        - setWeight: 20
+        - analysis:
+            templates:
+              - templateName: gateway-success-rate
+            args:
+              - name: service
+                value: sentinel-gateway-canary
+              - name: namespace
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+        - setWeight: 50
+        - pause: { duration: 5m }
+        - analysis:
+            templates:
+              - templateName: gateway-success-rate
+            args:
+              - name: service
+                value: sentinel-gateway-canary
+              - name: namespace
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+        - setWeight: 100
+
+      analysis:
+        # Runs for the whole rollout, not just at a step: an abort here reverts
+        # traffic to stable immediately.
+        templates:
+          - templateName: gateway-success-rate
+        args:
+          - name: service
+            value: sentinel-gateway-canary
+          - name: namespace
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+
+      abortScaleDownDelaySeconds: 60
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel-gateway-stable
+  labels:
+    app.kubernetes.io/name: sentinel-gateway
+spec:
+  selector:
+    app.kubernetes.io/name: sentinel-gateway
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel-gateway-canary
+  labels:
+    app.kubernetes.io/name: sentinel-gateway
+spec:
+  selector:
+    app.kubernetes.io/name: sentinel-gateway
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

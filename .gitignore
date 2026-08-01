@@ -1,0 +1,43 @@
+# --- terraform ------------------------------------------------------------
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+backend.hcl
+
+# --- keel -----------------------------------------------------------------
+# Local timing ledger. Commit it deliberately if you want the history shared.
+.keel/
+
+# --- kube -----------------------------------------------------------------
+kubeconfig
+*.kubeconfig
+
+# --- python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+
+# --- secrets --------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# Unsealed secrets must never be committed; sealed ones may.
+secret-*.yaml
+!sealed-*.yaml
+
+# --- scratch --------------------------------------------------------------
+_*.log
+
+# --- editors / os ---------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

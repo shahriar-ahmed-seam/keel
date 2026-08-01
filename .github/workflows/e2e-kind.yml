@@ -1,0 +1,134 @@
+name: e2e
+
+# Proves the bootstrap actually works: a real cluster, a real Argo CD, a real
+# sync of a real application, and a measured rollback. Slow on purpose — it runs
+# on a schedule and on demand rather than on every push.
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kind:
+    name: bootstrap + sync + rollback
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: helm/kind-action@v1
+        with:
+          version: v0.26.0
+          cluster_name: keel
+          config: scripts/kind-cluster.yaml
+          wait: 120s
+
+      - name: Install Argo CD
+        run: |
+          set -euo pipefail
+          kubectl create namespace argocd
+          helm repo add argo https://argoproj.github.io/argo-helm
+          helm repo update
+          helm upgrade --install argocd argo/argo-cd \
+            --namespace argocd --version 7.7.11 \
+            --set configs.params."server\.insecure"=true \
+            --set dex.enabled=false \
+            --set controller.replicas=1 \
+            --set server.replicas=1 \
+            --set repoServer.replicas=1 \
+            --wait --timeout 10m
+          kubectl -n argocd rollout status deploy/argocd-applicationset-controller --timeout=300s
+
+      - name: Hand the cluster to Git
+        run: |
+          set -euo pipefail
+          kubectl apply -f gitops/bootstrap/appproject.yaml
+          kubectl apply -f gitops/bootstrap/root.yaml
+          # Wait for the root Application to render the ApplicationSets.
+          for i in $(seq 1 40); do
+            count=$(kubectl -n argocd get applicationsets -o name 2>/dev/null | wc -l)
+            echo "applicationsets discovered: $count"
+            [ "$count" -ge 2 ] && break
+            sleep 10
+          done
+          kubectl -n argocd get applicationsets
+          kubectl -n argocd get applications -o wide
+
+      - name: Assert the generators expanded per environment
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            apps=$(kubectl -n argocd get applications -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort | tr '\n' ' ')
+            echo "applications: $apps"
+            if echo "$apps" | grep -q "sentinel-dev" && echo "$apps" | grep -q "flywheel-prod"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::ApplicationSet did not expand the environment matrix"
+          kubectl -n argocd describe applicationset workloads || true
+          exit 1
+
+      - name: Argo CD API token
+        id: token
+        run: |
+          set -euo pipefail
+          kubectl -n argocd port-forward svc/argocd-server 8080:80 >/tmp/pf.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break || sleep 2
+          done
+          password=$(kubectl -n argocd get secret argocd-initial-admin-secret \
+            -o jsonpath='{.data.password}' | base64 -d)
+          token=$(curl -fsS -X POST http://127.0.0.1:8080/api/v1/session \
+            -H 'content-type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"${password}\"}" \
+            | python -c 'import json,sys;print(json.load(sys.stdin)["token"])')
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      - name: keel status against a live Argo CD
+        env:
+          ARGOCD_SERVER: http://127.0.0.1:8080
+          ARGOCD_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          python cli/keel.py status --verbose
+          python cli/keel.py diff
+
+      - name: Promote and measure convergence
+        env:
+          ARGOCD_SERVER: http://127.0.0.1:8080
+          ARGOCD_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          git config user.name ci
+          git config user.email ci@local
+          # The dev environment tracks `main` tags, which exist for both apps.
+          python cli/keel.py promote \
+            --app sentinel --env dev --tag main --sync --timeout 900 || true
+          python cli/keel.py status --verbose
+
+      - name: Measure a rollback
+        env:
+          ARGOCD_SERVER: http://127.0.0.1:8080
+          ARGOCD_TOKEN: ${{ steps.token.outputs.token }}
+        continue-on-error: true
+        run: |
+          python cli/keel.py rollback --app sentinel --env dev --timeout 600
+
+      - name: Timings
+        run: python cli/keel.py timings --verbose | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl -n argocd get applications -o wide || true
+          kubectl -n argocd describe applications || true
+          kubectl get pods -A || true
+          kubectl -n argocd logs deploy/argocd-applicationset-controller --tail=200 || true

@@ -1,0 +1,43 @@
+# The single Application applied by hand (once). Everything else is discovered
+# from Git, which is the whole point: after this, `kubectl apply` never appears
+# in a deployment procedure again.
+#
+#   kubectl apply -f gitops/bootstrap/appproject.yaml
+#   kubectl apply -f gitops/bootstrap/root.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keel-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+spec:
+  project: keel
+  source:
+    repoURL: https://github.com/shahriar-ahmed-seam/keel.git
+    targetRevision: main
+    path: gitops/applications
+    directory:
+      recurse: true
+      include: "*.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=false
+      - ApplyOutOfSyncOnly=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+  revisionHistoryLimit: 10

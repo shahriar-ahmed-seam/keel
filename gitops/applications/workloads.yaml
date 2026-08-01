@@ -1,0 +1,95 @@
+# One ApplicationSet, N environments × M apps.
+#
+# The git generator reads every `gitops/environments/*/env.yaml`, so adding an
+# environment is a directory, not a code change. Each application's manifests
+# come from *its own repository* — this repo holds desired state, never a copy of
+# someone else's Kubernetes YAML.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: workloads
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+
+  # Deleting an env file should remove its Applications, but never silently
+  # delete the workloads. Argo asks for confirmation via the finalizer instead.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+
+  generators:
+    - matrix:
+        generators:
+          - git:
+              repoURL: https://github.com/shahriar-ahmed-seam/keel.git
+              revision: main
+              files:
+                - path: gitops/environments/*/env.yaml
+          - list:
+              elements:
+                - app: flywheel
+                - app: sentinel
+
+  template:
+    metadata:
+      name: "{{ .app }}-{{ .env }}"
+      labels:
+        keel.somokolonlabs.com/app: "{{ .app }}"
+        keel.somokolonlabs.com/env: "{{ .env }}"
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: keel
+      source:
+        repoURL: "{{ (index .apps .app).repoURL }}"
+        targetRevision: "{{ (index .apps .app).targetRevision }}"
+        path: "{{ (index .apps .app).path }}"
+        kustomize:
+          # The promotion surface: CI rewrites `tag` in env.yaml and Argo
+          # rewrites every image reference in the overlay to match.
+          images:
+            {{- range $name, $image := (index .apps .app).images }}
+            - "{{ $image }}:{{ (index $.apps $.app).tag }}"
+            {{- end }}
+          commonAnnotations:
+            keel.somokolonlabs.com/env: "{{ .env }}"
+            keel.somokolonlabs.com/revision: "{{ (index .apps .app).tag }}"
+      destination:
+        server: "{{ .cluster }}"
+        namespace: "{{ (index .apps .app).namespace }}"
+      syncPolicy:
+        {{- if .autoSync }}
+        automated:
+          prune: {{ .prune }}
+          selfHeal: {{ .selfHeal }}
+          allowEmpty: false
+        {{- end }}
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+          - PrunePropagationPolicy=foreground
+          - RespectIgnoreDifferences=true
+        managedNamespaceMetadata:
+          labels:
+            pod-security.kubernetes.io/enforce: restricted
+            keel.somokolonlabs.com/env: "{{ .env }}"
+        retry:
+          limit: 5
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 3m
+      # KEDA and HPAs own replica counts at runtime; Git owning them too would
+      # produce a permanent OutOfSync fight.
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/replicas
+      revisionHistoryLimit: 10
+      info:
+        - name: environment
+          value: "{{ .env }}"
+        - name: url
+          value: "https://{{ (index .apps .app).host }}"

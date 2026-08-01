@@ -1,0 +1,124 @@
+name: promote
+
+# Called by an application repository after it publishes an image, or run by
+# hand. This is the only writer of image tags in this repository, which is what
+# makes `git log gitops/environments/` a deployment history.
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: Application to promote
+        required: true
+        type: choice
+        options: [flywheel, sentinel]
+      env:
+        description: Target environment
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+      tag:
+        description: Image tag (e.g. sha-abc1234 or v1.2.3)
+        required: true
+        type: string
+      sync:
+        description: Trigger an Argo sync instead of waiting for auto-sync
+        type: boolean
+        default: false
+  repository_dispatch:
+    types: [promote]
+
+concurrency:
+  # Serialise promotions per environment: two writers racing on env.yaml would
+  # produce a merge conflict at best and a lost deployment at worst.
+  group: promote-${{ github.event.inputs.env || github.event.client_payload.env }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment:
+      # Requires a reviewer for prod if the environment has protection rules.
+      name: ${{ github.event.inputs.env || github.event.client_payload.env }}
+    env:
+      APP: ${{ github.event.inputs.app || github.event.client_payload.app }}
+      TARGET_ENV: ${{ github.event.inputs.env || github.event.client_payload.env }}
+      TAG: ${{ github.event.inputs.tag || github.event.client_payload.tag }}
+      SYNC: ${{ github.event.inputs.sync || false }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to promote a tag that was never published
+        run: |
+          set -euo pipefail
+          case "$APP" in
+            flywheel) images="flywheel-api flywheel-web" ;;
+            sentinel) images="sentinel-gateway sentinel-web" ;;
+            *) echo "::error::unknown app $APP"; exit 1 ;;
+          esac
+          for image in $images; do
+            ref="ghcr.io/${{ github.repository_owner }}/${image}:${TAG}"
+            echo "checking ${ref}"
+            if ! docker manifest inspect "$ref" >/dev/null 2>&1; then
+              echo "::error::${ref} is not published — a promotion to a missing image would leave pods in ImagePullBackOff"
+              exit 1
+            fi
+          done
+          echo "all images present"
+
+      - name: Write the tag and push
+        id: write
+        run: |
+          set -euo pipefail
+          git config user.name "keel-bot"
+          git config user.email "keel-bot@users.noreply.github.com"
+          python cli/keel.py --dry-run promote \
+            --app "$APP" --env "$TARGET_ENV" --tag "$TAG" \
+            --commit --push \
+            --message "promote(${TARGET_ENV}): ${APP} -> ${TAG}"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for Argo CD to converge
+        if: ${{ vars.ARGOCD_SERVER != '' }}
+        env:
+          ARGOCD_SERVER: ${{ vars.ARGOCD_SERVER }}
+          ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=(promote --app "$APP" --env "$TARGET_ENV" --tag "$TAG" --no-commit --force)
+          if [ "$SYNC" = "true" ]; then args+=(--sync); fi
+          python cli/keel.py "${args[@]}"
+
+      - name: Publish the timing
+        if: ${{ always() && vars.ARGOCD_SERVER != '' }}
+        run: |
+          python cli/keel.py timings --verbose | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Promotion"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| app | \`$APP\` |"
+            echo "| environment | \`$TARGET_ENV\` |"
+            echo "| tag | \`$TAG\` |"
+            echo "| commit | \`${{ steps.write.outputs.sha }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
