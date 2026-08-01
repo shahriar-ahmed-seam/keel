@@ -98,14 +98,18 @@ jobs:
           password=$(kubectl -n argocd get secret argocd-initial-admin-secret \
             -o jsonpath='{.data.password}' | base64 -d)
 
-          # Bind IPv4 explicitly. Left to itself kubectl also binds [::1], and if
-          # the IPv4 bind is the one that fails, kubectl keeps running and looks
-          # healthy while every `curl 127.0.0.1` fails against nothing.
+          # 18080, not 8080: scripts/kind-cluster.yaml maps hostPort 8080 to the
+          # node's :80 for ingress, so the kind container already owns 8080 on the
+          # host. kubectl could not bind IPv4 there, did not treat that as fatal,
+          # and kept running with only [::1] bound — so every curl to 127.0.0.1
+          # reached kind's ingress port instead and came back as a TLS handshake
+          # error or a connection reset, which looks exactly like a broken Argo CD.
+          # Bind IPv4 explicitly so a collision like that fails loudly instead.
           kubectl -n argocd port-forward --address 127.0.0.1 \
-            svc/argocd-server 8080:443 >/tmp/pf.log 2>&1 &
+            svc/argocd-server 18080:443 >/tmp/pf.log 2>&1 &
           sleep 5
           cat /tmp/pf.log || true
-          ss -lnt | grep ':8080' || echo "nothing listening on 8080 yet"
+          ss -lnt | grep ':18080' || echo "nothing listening on 18080 yet"
 
           # Do not assume the scheme. port-forward reaches the container port
           # directly, so the Service's 80-vs-443 split says nothing about whether
@@ -113,7 +117,7 @@ jobs:
           # carry whichever works through to the CLI steps.
           base=""
           for i in $(seq 1 40); do
-            for candidate in "https://127.0.0.1:8080" "http://127.0.0.1:8080"; do
+            for candidate in "https://127.0.0.1:18080" "http://127.0.0.1:18080"; do
               if curl -fsSk --max-time 5 "${candidate}/healthz" >/dev/null 2>&1; then
                 base="$candidate"
                 break
@@ -125,8 +129,8 @@ jobs:
 
           if [ -z "$base" ]; then
             echo "::error::argocd-server unreachable through the port-forward"
-            echo "--- https attempt ---"; curl -vk --max-time 10 https://127.0.0.1:8080/healthz || true
-            echo "--- http attempt ---";  curl -v  --max-time 10 http://127.0.0.1:8080/healthz  || true
+            echo "--- https attempt ---"; curl -vk --max-time 10 https://127.0.0.1:18080/healthz || true
+            echo "--- http attempt ---";  curl -v  --max-time 10 http://127.0.0.1:18080/healthz  || true
             echo "--- port-forward log ---"; cat /tmp/pf.log || true
             echo "--- listeners ---"; ss -lnt || true
             echo "--- server pod ---"; kubectl -n argocd get pods -l app.kubernetes.io/name=argocd-server -o wide || true
