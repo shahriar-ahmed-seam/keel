@@ -40,6 +40,34 @@ Nobody else's Kubernetes YAML is copied in here. That is the point.
 
 ---
 
+## What a real cluster proved
+
+`validate` is green — `terraform fmt`, `terraform validate`, kubeconform against
+the CRD catalogue, rejection of unpinned charts, ruff, shellcheck. It is also, on
+its own, close to worthless as evidence. The `e2e` workflow builds a real kind
+cluster, installs Argo CD and hands it the repository, and that is what found
+everything below. None of it was visible to a schema check.
+
+| What broke | Why nothing caught it |
+| --- | --- |
+| The workloads ApplicationSet was not valid YAML | An ApplicationSet is parsed as YAML *before* templating, and Go templates only substitute inside string values. A `range` building a list is a syntax error, not a loop. Both blocks moved to `templatePatch`, which is a string field and is what Argo documents for exactly this. |
+| `terraform validate` had never run | `terraform fmt` failed first, hiding a conditional whose two arms had different object types, an output derived from a sensitive variable, and a sensitive variable used as `for_each`. |
+| The bootstrap deployed **nothing**, silently | The root Application targets the `argocd` namespace, which the AppProject's allow-list omitted. Argo rejected it as `InvalidSpecError`, so no ApplicationSet was ever created. Every file validated clean. |
+| All six add-ons refused to sync | `resource :ServiceAccount is not permitted in project keel`. Every upstream chart creates ServiceAccounts; the blacklist exists so an app repo cannot mint cluster credentials. A blacklist is project-wide with no per-application exception, so add-ons moved to a separate `keel-addons` project and `keel` kept the strict rules. Our own overlays declare no ServiceAccount, so nothing was given up. |
+| Nothing could reach Argo CD's API | `bind: address already in use` — the kind config maps hostPort 8080 for ingress, so the port-forward could not have it. kubectl kept running with only `[::1]` bound, and requests hit the ingress instead. It surfaced as a TLS handshake error over https and a connection reset over http: two symptoms, one collision, neither about Argo CD. |
+
+What the e2e asserts today: Argo CD bootstraps, the generator matrix expands to
+every environment × app, the API answers, and a promotion rewrites **exactly one
+line in exactly one file** and is idempotent when repeated.
+
+What it does not yet assert: convergence and rollback *timings*. Those need pods
+that can start, which needs images the cluster can pull, and the GHCR packages are
+private. That step is marked informational and the run summary says plainly
+whether a timing was recorded — a green tick over a swallowed failure is worse
+than a red one.
+
+---
+
 ## Quickstart
 
 A local cluster, Argo CD, the add-ons and both applications:
@@ -52,7 +80,12 @@ Requires `kind`, `kubectl`, `helm`, `terraform`. Idempotent — re-running reuse
 the cluster. Then:
 
 ```bash
-kubectl -n argocd port-forward svc/argocd-server 8080:80 &
+# 18080, not 8080: the kind config maps hostPort 8080 to the node's :80 for
+# ingress, so 8080 is already taken. kubectl does not treat a failed IPv4 bind as
+# fatal, so a port-forward there keeps running while every request quietly
+# reaches the ingress instead.
+kubectl -n argocd port-forward --address 127.0.0.1 svc/argocd-server 18080:443 &
+export ARGOCD_SERVER=https://127.0.0.1:18080
 python cli/keel.py status
 ```
 
